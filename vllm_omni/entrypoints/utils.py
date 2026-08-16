@@ -18,7 +18,11 @@ from vllm_omni.config.config_factory import (
     with_trust_remote_code_override,
 )
 from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
-from vllm_omni.config.stage_config import _DEPLOY_DIR
+from vllm_omni.config.stage_config import (
+    _DEPLOY_DIR,
+    StageDeployConfig,
+    deploy_runtime_override_keys,
+)
 from vllm_omni.config.yaml_util import create_config, load_yaml_config
 from vllm_omni.diffusion.utils.hf_utils import (
     _looks_like_dreamzero,
@@ -535,6 +539,13 @@ def filter_stages(
         return stage_configs
 
 
+# Positive contract for stage override keys. Build once at import
+# so we don't re-frozenset on every parse call.
+_STAGE_OVERRIDE_ALLOWED_KEYS: frozenset[str] = (
+    frozenset(f.name for f in fields(StageDeployConfig) if f.name != "stage_id") | deploy_runtime_override_keys()
+)
+
+
 def parse_stage_overrides(value: Any) -> dict[str, dict[str, Any]] | None:
     """Parse the ``--stage-overrides`` value into a per-stage override dict.
 
@@ -542,16 +553,46 @@ def parse_stage_overrides(value: Any) -> dict[str, dict[str, Any]] | None:
     already-parsed mapping. Returns ``None`` when no overrides are given.
 
     Raises:
-        ValueError: when ``value`` is a string that is not valid JSON.
+        ValueError: when ``value`` is a string that is not valid JSON, or when
+            the parsed shape/keys are not a valid per-stage override mapping
+            (e.g. non-dict top level, non-integer stage id, non-dict value,
+            or unknown field name).
     """
     if not value:
         return None
     if isinstance(value, str):
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except json.JSONDecodeError as exc:
             raise ValueError(f"--stage-overrides is not valid JSON: {exc}. Got: {value!r}") from exc
-    return value
+    else:
+        parsed = value
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"--stage-overrides must be a JSON object mapping stage_id -> overrides, "
+            f"got {type(parsed).__name__}: {parsed!r}"
+        )
+    if not parsed:
+        return None
+
+    for stage_id_str, overrides in parsed.items():
+        if not isinstance(stage_id_str, str) or not stage_id_str.isdigit():
+            raise ValueError(
+                f"--stage-overrides keys must be non-negative integer stage ids (as strings), got {stage_id_str!r}"
+            )
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                f"--stage-overrides[{stage_id_str!r}] must be an object, got {type(overrides).__name__}: {overrides!r}"
+            )
+        unknown = set(overrides) - _STAGE_OVERRIDE_ALLOWED_KEYS
+        if unknown:
+            raise ValueError(
+                f"--stage-overrides[{stage_id_str!r}] has unknown fields: "
+                f"{sorted(unknown)}. Allowed: {sorted(_STAGE_OVERRIDE_ALLOWED_KEYS)}"
+            )
+
+    return parsed
 
 
 def load_and_resolve_stage_configs(

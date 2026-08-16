@@ -165,6 +165,43 @@ def test_parse_stage_overrides_invalid_json_raises() -> None:
     assert f"Got: {bad!r}" in message
 
 
+def test_parse_stage_overrides_rejects_non_dict_top_level() -> None:
+    """Top-level must be a JSON object (dict). A list, scalar, or non-dict
+    mapping is rejected with a ValueError naming ``--stage-overrides`` and
+    pointing at the bad shape. Without this guard, ``json.loads`` happily
+    returns a list/scalar and the override silently never applies."""
+    for bad in ("[1, 2, 3]", '"oops"', "42"):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            parse_stage_overrides(bad)
+
+
+def test_parse_stage_overrides_rejects_non_integer_stage_id() -> None:
+    """Stage-id keys must be non-negative integer strings. Letters, signs,
+    floats, and integer (non-string) keys all fail. ``str.isdigit()`` is the
+    minimal check: it rejects ``"-1"``, ``"abc"``, ``"1.5"``, and bare ``1``.
+
+    Note: ``json.loads`` normalizes integer object keys (``{"1": {}}``) into
+    the string ``"1"`` and would pass our digit check, so the integer-key case
+    is exercised via the already-parsed-dict code path (``parse_stage_overrides({1: {}})``)."""
+    bad_string_keys = ('"abc"', '"-1"', '"1.5"')
+    for bad_key in bad_string_keys:
+        with pytest.raises(ValueError, match="non-negative integer stage ids"):
+            parse_stage_overrides("{" + bad_key + ": {}}")
+    # Integer (non-string) key: must reach the structural check, not the JSON
+    # parser, so pass an already-parsed mapping directly.
+    with pytest.raises(ValueError, match="non-negative integer stage ids"):
+        parse_stage_overrides({1: {}})
+
+
+def test_parse_stage_overrides_rejects_unknown_field() -> None:
+    """Per-stage override keys must be a known stage config / engine field.
+    Unknown field names are rejected (with the allowed set listed) instead
+    of silently flowing downstream and being ignored or, worse, misapplied."""
+    with pytest.raises(ValueError, match="unknown fields") as excinfo:
+        parse_stage_overrides('{"0": {"bogus_field": 1}}')
+    assert "bogus_field" in str(excinfo.value)
+
+
 def test_run_headless_parses_and_forwards_stage_overrides(mocker: MockerFixture) -> None:
     """Regression: the headless path must parse ``--stage-overrides`` (a JSON
     string) and forward the parsed dict to ``load_and_resolve_stage_configs``,
